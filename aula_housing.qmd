@@ -1,0 +1,872 @@
+---
+title: "Quanto vale este imóvel?"
+subtitle: "Análise exploratória, criação de features e modelos de regressão com tidymodels"
+author: "MAT02053 – Estatística Aplicada a Negócios (UFRGS)"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-copy: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+# Contexto e setup
+
+## O problema de negócio
+
+Imagine que nós somos a **equipe de dados de uma imobiliária**. Os proprietários chegam perguntando sempre a mesma coisa: *"por quanto eu consigo vender a minha casa?"*. Hoje a resposta depende do "feeling" de cada corretor. Nossa missão é construir uma **calculadora de preço**: a pessoa informa as características do imóvel e recebe uma estimativa de preço.
+
+Isso não é ficção: plataformas como o QuintoAndar oferecem exatamente esse tipo de calculadora ("quanto vale meu imóvel?"). Por trás delas existe o que vamos fazer hoje:
+
+1. **Entender os dados** (análise exploratória e visualização);
+2. **Criar variáveis úteis** (features);
+3. **Treinar e comparar vários modelos** de machine learning;
+4. **Usar o melhor modelo** para prever o preço de uma casa nova.
+
+## Sobre os dados
+
+Vamos usar a base `Housing.csv` (disponível no Kaggle), com **545 casas vendidas na Índia**. Por isso:
+
+- o **preço** (`price`) está em **rúpias indianas**;
+- a **área** (`area`) está em **pés quadrados** (1 pé² ≈ 0,093 m²).
+
+Vamos manter as unidades originais. O raciocínio é exatamente o mesmo que faríamos com reais e metros quadrados.
+
+| Variável | Significado |
+|---|---|
+| `price` | preço de venda (rúpias) — **é o que queremos prever** |
+| `area` | área do terreno (pés²) |
+| `bedrooms`, `bathrooms` | número de quartos e de banheiros |
+| `stories` | número de andares |
+| `parking` | vagas de garagem |
+| `mainroad` | fica em rua principal? (yes/no) |
+| `guestroom` | tem quarto de hóspedes? (yes/no) |
+| `basement` | tem porão? (yes/no) |
+| `hotwaterheating` | tem aquecimento de água? (yes/no) |
+| `airconditioning` | tem ar-condicionado? (yes/no) |
+| `prefarea` | fica em área nobre/preferida? (yes/no) |
+| `furnishingstatus` | mobília: unfurnished, semi-furnished, furnished |
+
+## Um mínimo de R para começar
+
+Se você nunca usou R, estas três ideias bastam para acompanhar a aula:
+
+- **Objetos** guardam coisas. Criamos um objeto com a "setinha" `<-`.
+- **Funções** fazem coisas. Elas têm nome e parênteses: `mean(x)`, `round(3.14159, 2)`.
+- O **pipe** `|>` passa o resultado da esquerda para a função da direita. Lemos como **"e então"**.
+
+```{r}
+# 1. Contexto e setup ----
+
+# AULA: Quanto vale este imóvel? (MAT02053 - UFRGS)
+# Somos a equipe de dados de uma imobiliária e vamos construir uma
+# calculadora de preço de casas. Rode o script bloco a bloco (Ctrl + Enter).
+# Este arquivo é gerado a partir de aula_housing.qmd (veja o HTML com as explicações).
+
+# Criando um objeto chamado "precos" com quatro valores
+precos <- c(100, 250, 300, 150)
+
+# Aplicando uma função ao objeto: a média dos preços
+mean(precos)
+
+# O mesmo cálculo usando o pipe: "pegue precos E ENTÃO calcule a média"
+precos |> mean()
+
+# Pipes podem ser encadeados: média e então arredondamento com 1 casa
+precos |> mean() |> round(1)
+```
+
+## Pacotes
+
+Pacotes são "caixas de ferramentas" que estendem o R. O bloco abaixo **instala apenas os pacotes que ainda não estão no seu computador** (isso só precisa acontecer uma vez) e depois os carrega.
+
+```{r}
+# Lista de pacotes usados na aula
+pacotes <- c("tidyverse",   # manipulação (dplyr) e gráficos (ggplot2)
+             "tidymodels",  # framework de modelagem
+             "glmnet",      # regressão regularizada (LASSO)
+             "rpart",       # árvore de decisão
+             "ranger",      # random forest
+             "xgboost")     # gradient boosting
+
+# Quais ainda não estão instalados?
+faltando <- pacotes[!sapply(pacotes, requireNamespace, quietly = TRUE)]
+
+# Instala só os que faltam (se não faltar nenhum, não faz nada)
+if (length(faltando) > 0) install.packages(faltando)
+
+# Carrega os dois "pacotes-guarda-chuva" (eles carregam os demais por baixo)
+library(tidyverse)
+library(tidymodels)
+
+# Evita conflitos de nomes de funções iguais em pacotes diferentes
+tidymodels_prefer()
+```
+
+## Lendo os dados
+
+Os dados estão dentro do arquivo `archive.zip`, na pasta do projeto. Conseguimos ler o CSV **direto de dentro do zip**, sem descompactar.
+
+::: {.callout-important}
+Abra sempre a aula pelo arquivo **`housing_pricing.Rproj`**. Assim o RStudio já "entra" na pasta certa e o R encontra o `archive.zip`.
+:::
+
+```{r}
+# Conferindo se estamos na pasta certa antes de ler os dados
+if (!file.exists("archive.zip")) {
+  stop("Não encontrei o arquivo archive.zip. ",
+       "Feche o RStudio e abra o arquivo housing_pricing.Rproj ",
+       "(ou use o menu Session > Set Working Directory > Choose Directory ",
+       "e escolha a pasta housing_pricing).")
+}
+
+# unz() abre um arquivo de dentro do zip; read_csv() lê o CSV
+housing_bruto <- read_csv(unz("archive.zip", "Housing.csv"))
+
+# Primeira olhada: quantas linhas e colunas, e o tipo de cada coluna
+glimpse(housing_bruto)
+```
+
+As colunas `yes/no` e a mobília vieram como texto (`chr`). Para o R, é melhor tratá-las como **fatores** (`factor`), que é o tipo usado para variáveis **categóricas**. Também definimos a ordem das categorias da mobília, do "menos" para o "mais" mobiliado.
+
+```{r}
+# Colunas do tipo sim/não
+colunas_sim_nao <- c("mainroad", "guestroom", "basement",
+                     "hotwaterheating", "airconditioning", "prefarea")
+
+housing <- housing_bruto |>
+  # across() aplica a mesma transformação em várias colunas de uma vez.
+  # \(x) cria uma mini-função: "para cada coluna x, transforme x em fator"
+  mutate(across(all_of(colunas_sim_nao), \(x) factor(x, levels = c("no", "yes")))) |>
+  mutate(furnishingstatus = factor(furnishingstatus,
+                                   levels = c("unfurnished", "semi-furnished", "furnished")))
+
+# Conferindo o resultado: as colunas agora são <fct>
+glimpse(housing)
+```
+
+# Análise exploratória
+
+Antes de qualquer modelo, precisamos **conhecer os dados**. Cada gráfico abaixo responde a uma **pergunta de negócio**. É assim que a análise exploratória deve ser feita: guiada por perguntas, não por "fazer todos os gráficos possíveis".
+
+Os gráficos são feitos com o **ggplot2**, que constrói um gráfico em camadas:
+
+- `ggplot(dados, aes(x = ..., y = ...))` diz **quais dados** e **quais variáveis** vão em cada eixo;
+- `geom_...()` diz **que tipo de desenho** fazer (histograma, pontos, caixas...);
+- `labs()` coloca títulos e rótulos.
+
+## Um resumo numérico
+
+```{r}
+# 2. Análise exploratória ----
+
+# Resumo de cada coluna: mínimo, quartis, média, máximo (numéricas)
+# e contagem por categoria (fatores)
+summary(housing)
+```
+
+## Como os preços se distribuem?
+
+*Pergunta de negócio: a maioria das casas é barata ou cara? Existem casas "fora da curva"?*
+
+```{r}
+# Histograma: divide os preços em faixas e conta quantas casas há em cada faixa
+ggplot(housing, aes(x = price)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  scale_x_continuous(labels = scales::label_comma()) +   # números sem notação científica
+  labs(title = "Distribuição dos preços",
+       x = "Preço (rúpias)", y = "Número de casas")
+```
+
+A distribuição é **assimétrica à direita**: muitas casas com preço moderado e poucas casas muito caras, que formam uma "cauda" longa. Isso é muito comum com preços e salários.
+
+Uma transformação muito usada nesses casos é o **logaritmo**. Ele "encolhe" os valores grandes mais do que os pequenos, e a distribuição fica mais simétrica:
+
+```{r}
+# Mesmo histograma, agora com o log do preço
+ggplot(housing, aes(x = log(price))) +
+  geom_histogram(bins = 30, fill = "darkorange", color = "white") +
+  labs(title = "Distribuição do log do preço",
+       x = "log(Preço)", y = "Número de casas")
+```
+
+Bem mais simétrica! Por isso **os nossos modelos vão prever o `log(price)`**. No final, voltamos para rúpias com a função inversa do log, a exponencial (`exp()`).
+
+## Casas maiores são mais caras?
+
+*Pergunta de negócio: quanto a área influencia o preço?*
+
+```{r}
+# Gráfico de dispersão: cada ponto é uma casa
+ggplot(housing, aes(x = area, y = price)) +
+  geom_point(alpha = 0.5) +                          # alpha = transparência
+  geom_smooth(method = "lm", color = "red") +        # reta de tendência
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço vs. área",
+       x = "Área (pés²)", y = "Preço (rúpias)")
+```
+
+Existe uma **relação positiva**: casas maiores tendem a custar mais. Porém os pontos estão bem espalhados em volta da reta. **A área sozinha não explica tudo**, e outras características também importam.
+
+## Quais comodidades "valorizam" o imóvel?
+
+*Pergunta de negócio: ar-condicionado, área nobre, garagem... o que faz o preço subir?*
+
+O **boxplot** resume uma distribuição: a linha do meio é a **mediana**, a caixa vai do 1º ao 3º quartil (os 50% centrais das casas) e os pontos isolados são valores atípicos.
+
+```{r}
+# Boxplot do preço para casas com e sem ar-condicionado
+ggplot(housing, aes(x = airconditioning, y = price, fill = airconditioning)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço por presença de ar-condicionado",
+       x = "Tem ar-condicionado?", y = "Preço (rúpias)")
+```
+
+Para comparar **todas as variáveis sim/não de uma vez**, primeiro "empilhamos" essas colunas em formato longo com `pivot_longer()`. Depois desenhamos um painel para cada variável com `facet_wrap()`.
+
+```{r}
+# Boxplots do preço para TODAS as variáveis sim/não, um painel para cada
+housing |>
+  # Empilha as 6 colunas sim/não em duas: "variavel" (o nome) e "resposta" (yes/no)
+  pivot_longer(cols = all_of(colunas_sim_nao),
+               names_to = "variavel", values_to = "resposta") |>
+  ggplot(aes(x = resposta, y = price, fill = resposta)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ variavel, nrow = 2) +                  # um painel por variável
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço por característica (sim/não)",
+       x = NULL, y = "Preço (rúpias)")
+```
+
+Em **todas** as comodidades, as casas com "yes" têm mediana de preço maior. As maiores diferenças aparecem em **ar-condicionado**, **área nobre** (`prefarea`) e **quarto de hóspedes**. Atenção: só 25 casas têm aquecimento de água (`hotwaterheating`), e comparações com grupos tão pequenos são menos confiáveis. A tabela abaixo mostra quantas casas há em cada grupo.
+
+```{r}
+# Quantas casas têm cada comodidade? (ajuda a ler o gráfico anterior)
+housing |>
+  pivot_longer(cols = all_of(colunas_sim_nao),
+               names_to = "variavel", values_to = "resposta") |>
+  count(variavel, resposta) |>
+  pivot_wider(names_from = resposta, values_from = n)
+```
+
+## E a mobília?
+
+*Pergunta de negócio: vale a pena vender a casa mobiliada?*
+
+```{r}
+# Boxplot do preço por tipo de mobília
+ggplot(housing, aes(x = furnishingstatus, y = price, fill = furnishingstatus)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço por mobília",
+       x = "Mobília", y = "Preço (rúpias)")
+```
+
+Há uma "escada" clara: casas **mobiliadas** têm mediana de preço maior que as **semimobiliadas**, que por sua vez superam as **sem mobília**.
+
+## Mais banheiros, mais andares, preço maior?
+
+*Pergunta de negócio: as variáveis de "contagem" se relacionam com o preço?*
+
+```{r}
+# Boxplots do preço por quantidade de quartos, banheiros, andares e vagas
+housing |>
+  # Empilha as variáveis de contagem para fazer um painel de cada
+  pivot_longer(cols = c(bedrooms, bathrooms, stories, parking),
+               names_to = "variavel", values_to = "quantidade") |>
+  ggplot(aes(x = factor(quantidade), y = price)) +    # factor(): trata a contagem como categoria
+  geom_boxplot(fill = "lightgreen") +
+  facet_wrap(~ variavel, scales = "free_x") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço por quantidade de cômodos, andares e vagas",
+       x = "Quantidade", y = "Preço (rúpias)")
+```
+
+## Quais variáveis numéricas andam juntas?
+
+*Pergunta de negócio: quais características numéricas estão mais associadas ao preço? Há variáveis "repetindo" a mesma informação?*
+
+A **correlação** vai de -1 a 1 e mede o quanto duas variáveis numéricas crescem juntas (positiva) ou em sentidos opostos (negativa), em linha reta.
+
+```{r}
+# Matriz de correlação entre as variáveis numéricas
+matriz_cor <- housing |>
+  select(where(is.numeric)) |>
+  cor()
+
+round(matriz_cor, 2)
+
+# A mesma matriz em forma de "mapa de calor"
+matriz_cor |>
+  as_tibble(rownames = "var1") |>
+  pivot_longer(-var1, names_to = "var2", values_to = "correlacao") |>
+  ggplot(aes(x = var1, y = var2, fill = correlacao)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(correlacao, 2)), size = 3.5) +
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "steelblue",
+                       limits = c(-1, 1)) +
+  labs(title = "Correlação entre variáveis numéricas", x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+A **área** e o número de **banheiros** são as variáveis numéricas mais correlacionadas com o preço. Nenhuma correlação entre as explicativas é tão alta a ponto de "uma repetir a outra".
+
+# Criação de features
+
+**Features** são as variáveis que o modelo usa para prever. Muitas vezes conseguimos **criar features novas** a partir das que já temos, e elas ajudam o modelo a "enxergar" padrões. Essa etapa se chama **feature engineering** e é onde o conhecimento do negócio faz mais diferença.
+
+## Criando features "na mão"
+
+Vamos começar com o `mutate()` do dplyr, que cria ou modifica colunas:
+
+- `log_price`: o log do preço, que é **o que vamos prever** (vimos que ele é mais simétrico);
+- `log_area`: o log da área, pelo mesmo motivo da assimetria;
+- `total_comodos`: quartos + banheiros;
+- `n_comodidades`: quantas das 6 comodidades (sim/não) a casa tem. É um "índice de conforto";
+- `preco_pe2`: preço por pé², muito usado no mercado imobiliário.
+
+Vamos guardar essas transformações numa **função**, `criar_features()`. Assim podemos aplicá-las de novo, do mesmo jeito, em qualquer casa: inclusive na casa nova da calculadora, lá no final.
+
+```{r}
+# 3. Criação de features ----
+
+# Uma função recebe "dados" e devolve os dados com as colunas novas
+criar_features <- function(dados) {
+  dados |>
+    mutate(
+      log_price     = log(price),
+      log_area      = log(area),
+      total_comodos = bedrooms + bathrooms,
+      # rowSums() soma, linha a linha, quantas colunas sim/não são iguais a "yes"
+      n_comodidades = rowSums(across(all_of(colunas_sim_nao), \(x) x == "yes")),
+      preco_pe2     = price / area
+    )
+}
+
+housing_feat <- criar_features(housing)
+
+# Olhando só as colunas novas das primeiras casas
+housing_feat |>
+  select(price, area, log_price, log_area, total_comodos, n_comodidades, preco_pe2) |>
+  head()
+```
+
+O índice de comodidades faz sentido para o negócio? Vejamos:
+
+```{r}
+# A feature nova faz sentido? Preço por número de comodidades
+ggplot(housing_feat, aes(x = factor(n_comodidades), y = price)) +
+  geom_boxplot(fill = "plum") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(title = "Preço por número de comodidades",
+       x = "Número de comodidades (0 a 6)", y = "Preço (rúpias)")
+```
+
+Quanto mais comodidades, maior tende a ser o preço. É uma feature simples e útil.
+
+E o preço por pé²? Ele mostra o **valor do "metro quadrado"** em cada região:
+
+```{r}
+# Preço por pé² (só para explorar: NÃO pode entrar no modelo, pois usa o preço!)
+ggplot(housing_feat, aes(x = prefarea, y = preco_pe2, fill = prefarea)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(title = "Preço por pé² dentro e fora da área nobre",
+       x = "Área nobre?", y = "Preço por pé² (rúpias)")
+```
+
+::: {.callout-warning}
+## Cuidado com o vazamento de dados (*data leakage*)
+
+O `preco_pe2` é ótimo para **explorar** os dados, mas **não pode entrar no modelo**. Ele é calculado com o próprio preço! Na calculadora, a pessoa ainda não sabe o preço da casa, então também não sabe o preço por pé². Usar uma variável que "contém a resposta" deixa o modelo artificialmente perfeito no treino e inútil na prática. Isso se chama **vazamento de dados**.
+:::
+
+## Separando treino e teste
+
+Para saber se um modelo funciona em casas **que ele nunca viu**, separamos os dados em duas partes:
+
+- **treino (80%)**: usado para ajustar os modelos;
+- **teste (20%)**: guardado "no cofre" e usado **uma única vez**, no final, para a avaliação definitiva.
+
+O `set.seed()` fixa o sorteio. Assim todos na sala obtêm exatamente a mesma divisão e os mesmos resultados.
+
+```{r}
+# Separando 80% das casas para treino e 20% para teste
+# set.seed() fixa o sorteio: todos obtêm a mesma divisão
+set.seed(2026)
+
+# strata = price: garante casas baratas e caras em proporções parecidas nas duas partes
+split_housing <- initial_split(housing_feat, prop = 0.8, strata = price)
+
+treino <- training(split_housing)
+teste  <- testing(split_housing)
+
+# Quantas casas ficaram em cada parte?
+nrow(treino)
+nrow(teste)
+```
+
+## Validação cruzada
+
+Ainda dentro do treino, queremos **comparar modelos** sem tocar no teste. Para isso usamos a **validação cruzada com 5 *folds***:
+
+1. o treino é dividido em 5 pedaços (*folds*);
+2. o modelo é ajustado em 4 pedaços e avaliado no 5º;
+3. isso se repete 5 vezes, cada vez deixando um pedaço diferente de fora;
+4. a nota final é a **média das 5 avaliações**.
+
+Assim cada modelo recebe uma nota mais estável do que se fosse avaliado uma vez só.
+
+```{r}
+# Validação cruzada: divide o treino em 5 pedaços (folds)
+set.seed(2026)
+folds <- vfold_cv(treino, v = 5, strata = price)
+folds
+```
+
+## A receita (*recipe*): features do jeito tidymodels
+
+O `mutate()` foi ótimo para entender as features. Mas há transformações que **aprendem algo com os dados**, como a **normalização** (subtrair a média e dividir pelo desvio-padrão). Essa média e esse desvio-padrão precisam ser calculados **só com o treino**. Se usarmos o teste nesse cálculo, ele "vaza" informação para o modelo.
+
+O tidymodels resolve isso com a **receita** (`recipe`): uma lista de passos de preparação que é **aprendida no treino** e **aplicada igualzinha** em qualquer dado novo (teste, validação cruzada, ou a casa da calculadora).
+
+```{r}
+receita <- recipe(log_price ~ ., data = treino) |>   # prever log_price com todas as outras colunas...
+  step_rm(price, preco_pe2) |>                        # ...exceto price e preco_pe2 (vazamento!)
+  step_dummy(all_nominal_predictors()) |>             # categorias viram colunas 0/1 (dummies)
+  step_normalize(all_numeric_predictors())            # numéricas com média 0 e desvio-padrão 1
+
+# Imprimir a receita mostra a lista de passos
+receita
+```
+
+Para ver o que a receita produz, fazemos o `prep()`, que **aprende** (calcula médias, desvios, categorias), e o `bake()`, que **aplica** a receita:
+
+```{r}
+# Só para olhar o resultado da receita (o tidymodels faz isso sozinho ao modelar)
+receita |>
+  prep() |>                   # aprende os passos usando o treino
+  bake(new_data = NULL) |>    # aplica nos próprios dados de treino
+  glimpse()
+```
+
+Repare que `airconditioning` virou `airconditioning_yes` (0 ou 1, depois normalizado), que a mobília virou duas dummies e que `price` e `preco_pe2` sumiram. **Não precisamos fazer `prep()`/`bake()` manualmente para modelar**: o tidymodels faz isso automaticamente dentro de cada *fold* da validação cruzada. Aqui fizemos só para olhar.
+
+# Modelagem
+
+## A lógica do tidymodels
+
+No tidymodels, um modelo é montado como um "lego" com três peças:
+
+1. **o tipo de modelo** (`linear_reg()`, `rand_forest()`...): *que* modelo usar;
+2. **o motor** (`set_engine()`): *qual pacote* do R faz as contas;
+3. **o modo** (`set_mode()`): *regressão* (prever um número) ou *classificação* (prever uma categoria).
+
+A receita e o modelo se juntam num **workflow** (fluxo de trabalho). Isso garante que a mesma preparação de dados seja sempre aplicada antes do modelo.
+
+## Os cinco candidatos
+
+| Modelo | Ideia em uma frase |
+|---|---|
+| **Regressão linear** | o preço (em log) é uma soma ponderada das características |
+| **LASSO** | regressão linear que "encolhe" coeficientes pouco úteis até zero, evitando exagero |
+| **Árvore de decisão** | uma sequência de perguntas sim/não ("área > 5000?") que termina num preço |
+| **Random forest** | centenas de árvores diferentes "votando": a previsão é a média delas |
+| **XGBoost** | árvores construídas em sequência, cada uma corrigindo os erros das anteriores |
+
+```{r}
+# 4. Modelagem ----
+
+# Modelo 1: Regressão linear
+modelo_linear <- linear_reg() |>
+  set_engine("lm")
+
+# Modelo 2: LASSO: a "penalty" (quanto encolher) será escolhida por tuning logo abaixo
+modelo_lasso <- linear_reg(penalty = tune(), mixture = 1) |>   # mixture = 1 significa LASSO
+  set_engine("glmnet")
+
+# Modelo 3: Árvore de decisão com no máximo 5 níveis de perguntas
+modelo_arvore <- decision_tree(tree_depth = 5) |>
+  set_engine("rpart") |>
+  set_mode("regression")
+
+# Modelo 4: Random forest com 500 árvores
+modelo_rf <- rand_forest(trees = 500, min_n = 5) |>
+  set_engine("ranger", seed = 2026, num.threads = 1) |>   # seed e 1 thread: resultado reprodutível
+  set_mode("regression")
+
+# Modelo 5: XGBoost com 300 árvores pequenas e aprendizado lento
+modelo_xgb <- boost_tree(trees = 300, learn_rate = 0.05, tree_depth = 3) |>
+  set_engine("xgboost", nthread = 1) |>
+  set_mode("regression")
+```
+
+## Um pouquinho de tuning: a penalidade do LASSO
+
+**Hiperparâmetros** são "botões" do modelo que não são aprendidos com os dados: nós escolhemos. No LASSO, o botão principal é a **penalidade**. Com penalidade zero ele é igual à regressão linear; com penalidade grande, ele zera todos os coeficientes.
+
+Para escolher o valor, testamos **10 valores** de penalidade na validação cruzada e ficamos com o que tiver o **menor erro (RMSE)**. Isso é o **tuning**. Nos outros modelos usamos valores fixos razoáveis, para a aula não ficar lenta.
+
+```{r}
+# Tuning: testa 10 valores de penalidade do LASSO na validação cruzada
+set.seed(2026)
+tuning_lasso <- workflow() |>
+  add_recipe(receita) |>
+  add_model(modelo_lasso) |>
+  tune_grid(resamples = folds, grid = 10)   # 10 valores de penalidade
+
+# Os melhores valores de penalidade segundo o RMSE (em escala log)
+show_best(tuning_lasso, metric = "rmse", n = 3)
+
+# Fixando a melhor penalidade no modelo LASSO
+melhor_penalidade <- select_best(tuning_lasso, metric = "rmse")
+modelo_lasso_final <- finalize_model(modelo_lasso, melhor_penalidade)
+modelo_lasso_final
+```
+
+::: {.callout-tip}
+## Apareceu um aviso no console?
+
+Durante o tuning pode aparecer: *"`estimate` is constant and has 0 standard deviation"*. Nas penalidades muito altas, o LASSO zera todos os coeficientes e prevê **o mesmo preço para todas as casas**. Aí o R² não pode ser calculado. É esperado e não atrapalha: essas penalidades simplesmente perdem a disputa.
+:::
+
+## Treinando todos os modelos de uma vez
+
+O `workflow_set()` combina a receita com os cinco modelos. O `workflow_map()` roda a **validação cruzada para todos eles**. Usamos `save_pred = TRUE` para guardar as previsões de cada *fold*: vamos precisar delas para calcular os erros em rúpias.
+
+```{r}
+# Junta a receita com os 5 modelos num único "conjunto de workflows"
+modelos_wf <- workflow_set(
+  preproc = list(receita = receita),
+  models  = list(linear = modelo_linear,
+                 lasso  = modelo_lasso_final,
+                 arvore = modelo_arvore,
+                 rf     = modelo_rf,
+                 xgb    = modelo_xgb)
+)
+
+# Roda a validação cruzada para os 5 modelos (guardando as previsões)
+modelos_wf <- modelos_wf |>
+  workflow_map("fit_resamples",
+               resamples = folds,
+               control = control_resamples(save_pred = TRUE),
+               seed = 2026)
+
+# Uma linha por modelo, com os resultados dentro
+modelos_wf
+```
+
+::: {.callout-tip}
+## E o aviso *"prediction from rank-deficient fit"*?
+
+Ele vem da regressão linear e é uma ótima lição de estatística! Criamos `total_comodos = bedrooms + bathrooms`, que é uma **combinação linear exata** de outras duas variáveis (**multicolinearidade perfeita**). A regressão linear não consegue separar o efeito das três, então o R descarta uma delas automaticamente e avisa. O LASSO, por ter penalidade, lida com isso sem reclamar. Moral: nem toda feature nova traz informação nova.
+:::
+
+## Voltando para rúpias
+
+Os modelos preveem **log(preço)**. Um erro de "0,2 em log" não diz nada para um corretor! Por isso:
+
+1. pegamos as previsões de cada modelo em cada *fold*;
+2. aplicamos `exp()` no valor real e no previsto, o que **desfaz o log** e volta para rúpias;
+3. calculamos as métricas de erro em rúpias.
+
+```{r}
+# Previsões de cada modelo em cada fold, de volta para rúpias
+previsoes_cv <- modelos_wf |>
+  collect_predictions(summarize = FALSE) |>
+  mutate(preco_real     = exp(log_price),   # exp() desfaz o log
+         preco_previsto = exp(.pred))
+
+# Olhando algumas previsões
+previsoes_cv |>
+  select(wflow_id, id, preco_real, preco_previsto) |>
+  head()
+```
+
+## As métricas de qualidade do ajuste
+
+| Métrica | O que mede | Melhor quando |
+|---|---|---|
+| **RMSE** (raiz do erro quadrático médio) | erro típico em rúpias, **punindo mais os erros grandes** | menor |
+| **MAE** (erro absoluto médio) | erro médio em rúpias, todos os erros com o mesmo peso | menor |
+| **MAPE** (erro percentual absoluto médio) | erro médio **em %** do preço real | menor |
+| **R²** (coeficiente de determinação) | quanto da variação dos preços o modelo acompanha (de 0 a 1) | maior |
+
+O R² também é calculado em rúpias, depois do `exp()`, como as outras métricas. No `yardstick`, a função `rsq()` calcula o **quadrado da correlação** entre o preço real e o previsto. Para um modelo bem calibrado, isso equivale à "proporção da variação explicada".
+
+Cada métrica conversa com uma preocupação diferente da imobiliária. O **RMSE** importa se errar feio numa casa cara é muito grave. O **MAE** é o "erro típico" que o corretor vai sentir. O **MAPE** trata igualmente casas baratas e caras: errar 10% é errar 10%.
+
+```{r}
+# Conjunto das 4 métricas
+metricas <- metric_set(rmse, mae, mape, rsq)
+
+metricas_cv <- previsoes_cv |>
+  group_by(wflow_id, id) |>                                   # para cada modelo e cada fold...
+  metricas(truth = preco_real, estimate = preco_previsto) |>  # ...calcula as 4 métricas
+  group_by(wflow_id, .metric) |>                              # e então, para cada modelo e métrica...
+  summarise(mean    = mean(.estimate),                        # ...a média nos 5 folds
+            std_err = sd(.estimate) / sqrt(n()),              # ...e o erro-padrão dessa média
+            .groups = "drop")
+
+# Tabela comparativa: uma linha por modelo, uma coluna por métrica
+metricas_cv |>
+  select(-std_err) |>
+  pivot_wider(names_from = .metric, values_from = mean) |>
+  arrange(rmse)
+```
+
+```{r}
+#| fig-height: 6
+# Gráfico de comparação: ponto = média nos folds; barra = ± 1 erro-padrão
+metricas_cv |>
+  mutate(modelo = str_remove(wflow_id, "receita_")) |>
+  ggplot(aes(x = mean, y = reorder(modelo, mean))) +
+  geom_point(size = 3, color = "steelblue") +
+  geom_errorbar(aes(xmin = mean - std_err, xmax = mean + std_err), width = 0.2) +
+  facet_wrap(~ .metric, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +  # 1.2M = 1,2 milhão
+  labs(title = "Comparação dos modelos na validação cruzada",
+       subtitle = "RMSE, MAE e MAPE: menor é melhor  |  R²: maior é melhor",
+       x = "Valor médio nos 5 folds", y = NULL)
+```
+
+## Quem vence em cada métrica?
+
+```{r}
+# O melhor modelo em cada métrica (média dos 5 folds)
+vencedor_por_metrica <- metricas_cv |>
+  group_by(.metric) |>
+  # para rsq o melhor é o MAIOR; para as outras, o MENOR
+  slice_min(if_else(.metric == "rsq", -mean, mean), n = 1) |>
+  ungroup() |>
+  select(.metric, wflow_id, mean)
+
+vencedor_por_metrica
+```
+
+No nosso resultado, o **`r vencedor_por_metrica$wflow_id[vencedor_por_metrica$.metric == "rmse"] |> str_remove("receita_")`** ficou em primeiro lugar no RMSE. Antes de declarar um campeão, porém, olhe o **erro-padrão** no gráfico. Quando as barras de dois modelos se sobrepõem, a diferença entre eles é menor que a própria variação entre os *folds*. Na prática, é um **empate técnico**.
+
+## O vencedor muda de *fold* para *fold*?
+
+A média esconde a variação. Vamos ver **quem venceu em cada um dos 5 *folds***, para cada métrica:
+
+```{r}
+# Quantos folds cada modelo venceu, em cada métrica?
+vencedores_por_fold <- previsoes_cv |>
+  group_by(wflow_id, id) |>
+  metricas(truth = preco_real, estimate = preco_previsto) |>
+  group_by(id, .metric) |>                                         # para cada fold e métrica...
+  slice_min(if_else(.metric == "rsq", -.estimate, .estimate), n = 1) |>  # ...o melhor modelo
+  ungroup() |>
+  count(.metric, wflow_id, name = "folds_vencidos")
+
+vencedores_por_fold |>
+  pivot_wider(names_from = .metric, values_from = folds_vencidos, values_fill = 0)
+```
+
+Agora a história fica mais interessante. Dependendo do pedaço dos dados e da **métrica escolhida**, o vencedor muda. As métricas olham o erro de jeitos diferentes:
+
+- o **RMSE** eleva os erros ao quadrado, então **um erro enorme numa mansão pesa muito**;
+- o **MAE** trata todos os erros em rúpias igualmente;
+- o **MAPE** mede erro **em porcentagem**, então errar 500 mil numa casa barata pesa mais do que errar 500 mil numa casa cara.
+
+Um modelo que acerta bem as casas caras pode se dar melhor no RMSE. Um que acerta bem as casas baratas pode se dar melhor no MAPE. **Escolher a métrica é uma decisão de negócio**: qual tipo de erro custa mais caro para a imobiliária?
+
+::: {.callout-note}
+## Por que os modelos mais "simples" foram tão bem?
+
+Com apenas 545 casas e uma relação aproximadamente linear entre as características e o **log** do preço, modelos lineares costumam ir muito bem. Random forest e XGBoost brilham quando há **muitos dados** e **relações complexas**. Mais complexo **não** é sinônimo de melhor!
+:::
+
+# Fechamento
+
+## A prova final: o conjunto de teste
+
+Escolhemos o modelo vencedor no **RMSE** da validação cruzada. Agora, pela primeira vez, abrimos o "cofre": o `last_fit()` **ajusta o modelo com todo o treino** e **avalia no teste**, nas casas que nenhum modelo viu até aqui.
+
+```{r}
+# 5. Fechamento ----
+
+# Nome do modelo vencedor no RMSE
+vencedor_rmse <- vencedor_por_metrica |>
+  filter(.metric == "rmse") |>
+  pull(wflow_id)
+
+vencedor_rmse
+
+# Ajuste final: treina no treino completo e avalia no teste
+ajuste_final <- modelos_wf |>
+  extract_workflow(vencedor_rmse) |>
+  last_fit(split_housing)
+
+# Previsões no teste, de volta para rúpias
+previsoes_teste <- ajuste_final |>
+  collect_predictions() |>
+  mutate(preco_real     = exp(log_price),
+         preco_previsto = exp(.pred))
+
+# As mesmas 4 métricas, agora no teste
+metricas_teste <- previsoes_teste |>
+  metricas(truth = preco_real, estimate = preco_previsto)
+
+metricas_teste
+```
+
+Se as métricas do teste ficarem **parecidas** com as da validação cruzada, é um bom sinal: o modelo **generaliza** para casas novas e não apenas "decorou" o treino.
+
+```{r}
+# Previsto vs. real: quanto mais perto da linha tracejada, melhor
+ggplot(previsoes_teste, aes(x = preco_real, y = preco_previsto)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "red") +   # linha de 45°: previsão perfeita
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  coord_equal() +
+  labs(title = "Conjunto de teste: preço previsto vs. preço real",
+       x = "Preço real (rúpias)", y = "Preço previsto (rúpias)")
+```
+
+Repare que o modelo erra mais nas casas **muito caras**. Elas são raras nos dados, então o modelo tem pouca informação sobre elas.
+
+## Quais características mais pesam no preço?
+
+Vamos medir a importância de cada característica com uma ideia simples, a **importância por permutação**:
+
+1. calculamos o erro (RMSE) do modelo no teste;
+2. **embaralhamos** uma coluna, por exemplo `area`, destruindo a relação dela com o preço;
+3. calculamos o erro de novo. **Quanto mais o erro piorar, mais importante era aquela coluna.**
+
+Essa ideia funciona para **qualquer** modelo, seja ele linear, árvore ou floresta.
+
+```{r}
+# O modelo final já treinado
+modelo_final <- extract_workflow(ajuste_final)
+
+# Teste só com as colunas originais (as features são recalculadas depois)
+teste_original <- teste |> select(all_of(names(housing)))
+
+# Função: RMSE (em rúpias) do modelo final num conjunto de dados
+rmse_rupias <- function(dados) {
+  dados_feat <- criar_features(dados)
+  previsto <- exp(predict(modelo_final, dados_feat)$.pred)
+  rmse_vec(truth = dados$price, estimate = previsto)
+}
+
+rmse_original <- rmse_rupias(teste_original)
+
+# Para cada característica: embaralha 10 vezes e mede o aumento médio do erro
+caracteristicas <- setdiff(names(housing), "price")
+
+set.seed(2026)
+importancia <- map_dfr(caracteristicas, \(variavel) {
+  aumentos <- replicate(10, {
+    embaralhado <- teste_original
+    embaralhado[[variavel]] <- sample(embaralhado[[variavel]])   # embaralha a coluna
+    rmse_rupias(embaralhado) - rmse_original
+  })
+  tibble(variavel = variavel, aumento_rmse = mean(aumentos))
+})
+
+importancia |>
+  ggplot(aes(x = aumento_rmse, y = reorder(variavel, aumento_rmse))) +
+  geom_col(fill = "steelblue") +
+  scale_x_continuous(labels = scales::label_comma()) +
+  labs(title = "Importância por permutação",
+       subtitle = "Quanto o RMSE (em rúpias) piora ao embaralhar cada característica",
+       x = "Aumento do RMSE (rúpias)", y = NULL)
+```
+
+O resultado conversa com o que vimos na análise exploratória: **área** e **banheiros** lideram, seguidos de **ar-condicionado**, **número de andares** e **área nobre**. É um bom sinal quando o modelo "aprende" relações que fazem sentido para o negócio.
+
+## A calculadora de preço
+
+Chegamos ao produto final! Um proprietário descreve a casa dele, e o modelo responde **quanto ela vale**. Experimente mudar as características abaixo (área, ar-condicionado, área nobre...) e veja como o preço estimado muda.
+
+Para não repetir código, guardamos todo o processo numa **função** `prever_preco()`. Ela confere se as características foram digitadas corretamente, faz as mesmas conversões dos dados originais, cria as features e devolve o preço em rúpias.
+
+```{r}
+# Função da calculadora: recebe a descrição da casa e devolve o preço em rúpias
+prever_preco <- function(casa) {
+  # 1. Conferindo a digitação (um "Yes" com maiúscula viraria NA sem aviso!)
+  for (coluna in colunas_sim_nao) {
+    if (!casa[[coluna]] %in% c("yes", "no")) {
+      stop("A característica '", coluna, "' foi digitada errado: use \"yes\" ou \"no\".")
+    }
+  }
+  if (!casa$furnishingstatus %in% levels(housing$furnishingstatus)) {
+    stop("A característica 'furnishingstatus' foi digitada errado: use ",
+         "\"unfurnished\", \"semi-furnished\" ou \"furnished\".")
+  }
+
+  # 2. Mesmas conversões que fizemos nos dados originais
+  casa_preparada <- casa |>
+    mutate(across(all_of(colunas_sim_nao), \(x) factor(x, levels = c("no", "yes"))),
+           furnishingstatus = factor(furnishingstatus, levels = levels(housing$furnishingstatus)),
+           price = NA_real_) |>   # o preço é desconhecido: é o que queremos descobrir!
+    criar_features()
+
+  # 3. Previsão em log e então exp() para voltar a rúpias
+  exp(predict(modelo_final, casa_preparada)$.pred)
+}
+```
+
+Agora é só descrever a casa e chamar a função:
+
+```{r}
+# A casa do proprietário: preencha TODAS as características
+casa_digitada <- tibble(
+  area             = 6000,              # pés²
+  bedrooms         = 3,
+  bathrooms        = 2,
+  stories          = 2,                 # andares
+  parking          = 1,                 # vagas de garagem
+  mainroad         = "yes",             # "yes" ou "no"
+  guestroom        = "no",              # "yes" ou "no"
+  basement         = "yes",             # "yes" ou "no"
+  hotwaterheating  = "no",              # "yes" ou "no"
+  airconditioning  = "yes",             # "yes" ou "no"
+  prefarea         = "no",              # "yes" ou "no"
+  furnishingstatus = "semi-furnished"   # "unfurnished", "semi-furnished" ou "furnished"
+)
+
+preco_previsto <- prever_preco(casa_digitada)
+
+cat("Preço estimado:", scales::comma(preco_previsto), "rúpias\n")
+```
+
+Uma boa calculadora também informa **o tamanho típico do erro**. O MAPE do teste diz que, em média, o modelo erra cerca de **`r round(metricas_teste$.estimate[metricas_teste$.metric == "mape"])`%** do preço real. Podemos mostrar ao proprietário uma faixa de ± MAPE em volta da estimativa:
+
+```{r}
+# Faixa de ± MAPE em volta do preço estimado
+mape_teste <- metricas_teste |> filter(.metric == "mape") |> pull(.estimate)
+
+cat("Faixa de ± erro típico:",
+    scales::comma(preco_previsto * (1 - mape_teste / 100)), "a",
+    scales::comma(preco_previsto * (1 + mape_teste / 100)), "rúpias\n")
+
+# Mas atenção: quantas casas do teste realmente caíram dentro de ± MAPE da sua previsão?
+cobertura_faixa <- previsoes_teste |>
+  summarise(dentro = mean(abs(preco_real - preco_previsto) / preco_real <= mape_teste / 100)) |>
+  pull(dentro)
+
+cat("Casas do teste dentro da faixa:", scales::percent(cobertura_faixa), "\n")
+```
+
+::: {.callout-warning}
+## Erro médio não é intervalo de confiança
+
+O MAPE é um **erro médio**, não uma garantia. No nosso teste, apenas **`r scales::percent(cobertura_faixa)`** das casas ficaram dentro de ± MAPE da previsão. As demais erraram mais do que isso. Para uma faixa com cobertura conhecida (por exemplo, 80% ou 95% das casas), seriam necessárias técnicas próprias, como **intervalos de predição** ou *conformal prediction*. Esse é um ótimo próximo passo para uma calculadora de verdade!
+:::
+
+## Resumo da aula
+
+1. **Análise exploratória**: o preço é assimétrico (por isso usamos log), e área, banheiros, ar-condicionado e área nobre se associam a preços maiores.
+2. **Features**: criamos variáveis novas, aprendemos a evitar **vazamento de dados** (`preco_pe2`) e usamos a **receita** para preparar os dados de forma segura.
+3. **Modelagem**: comparamos 5 modelos com validação cruzada e 4 métricas. **O "melhor modelo" depende da métrica e da variação entre os folds**, e modelos simples podem vencer os complexos.
+4. **Produto**: avaliamos o vencedor no teste e construímos uma calculadora de preço, deixando claro o tamanho típico do erro e seus limites.
