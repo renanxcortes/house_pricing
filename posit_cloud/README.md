@@ -71,7 +71,7 @@ Se aparecer `ERRO ...`, leia a mensagem. Na maioria das vezes basta rodar o coma
 
 Para deixar o painel **Files** mais limpo, você pode apagar **dentro do Posit Cloud** os arquivos que só servem para o professor. Isso não muda nada no GitHub.
 
-- `tools/`, `tests/`, `docs/`, `posit_cloud/`
+- `tools/`, `tests/`, `posit_cloud/`
 - `aula_housing.qmd`, `historico_conversa.md`, `link.txt`
 
 **Não apague** `aula_housing.R`, `aula_housing.html`, `archive.zip` nem o arquivo `.Rprofile`. Ele fica oculto: para vê-lo, use **More > Show Hidden Files** no painel Files.
