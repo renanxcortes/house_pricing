@@ -55,6 +55,8 @@ Requisitos: R ≥ 4.5. O script completo roda em cerca de 30 segundos.
 
 > **Dica para o professor:** rode o bloco de instalação de pacotes nos computadores do laboratório **antes da aula**. Instalar tudo do zero pode demorar.
 
+> **Não dá para instalar os pacotes no laboratório?** Use a opção no **Posit Cloud** (RStudio no navegador). Os alunos não instalam nada. Veja o guia em [`posit_cloud/`](posit_cloud/).
+
 ## Como editar o material (professor)
 
 O `.qmd` é a fonte. **Não edite `aula_housing.R` à mão**, porque ele é sobrescrito pelo build. Depois de alterar o `.qmd`, rode a partir desta pasta:
